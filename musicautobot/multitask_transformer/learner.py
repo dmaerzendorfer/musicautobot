@@ -1,3 +1,4 @@
+from multiprocessing import Pipe
 from fastai.basics import *
 from ..vocab import *
 from ..utils.top_k_top_p import top_k_top_p
@@ -44,6 +45,82 @@ class MultitaskLearner(Learner):
             gc.collect()
         return out_path
 
+    def predict_nw_into_pipe(self, pipe:Pipe, item:MusicItem, n_words:int=128,
+                     temperatures:float=(1.0,1.0), min_bars=4,
+                     top_k=30, top_p=0.6):
+        "Return the `n_words` that come after `text`. Whilst also puting the tokens into a pipe"
+        p_output, p_input = pipe
+
+        self.model.reset()
+        new_idx = []
+        vocab = self.data.vocab
+        x, pos = item.to_tensor(), item.get_pos_tensor()
+        last_pos = pos[-1] if len(pos) else 0
+        y = torch.tensor([0])
+
+        start_pos = last_pos
+
+        sep_count = 0
+        bar_len = SAMPLE_FREQ * 4 # assuming 4/4 time
+        vocab = self.data.vocab
+
+        repeat_count = 0
+
+        for i in progress_bar(range(n_words), leave=True):
+            batch = { 'lm': { 'x': x[None], 'pos': pos[None] } }, y
+            logits = self.pred_batch(batch=batch)['lm'][-1][-1]
+
+            prev_idx = new_idx[-1] if len(new_idx) else vocab.pad_idx
+
+            # Temperature
+            # Use first temperatures value if last prediction was duration
+            temperature = temperatures[0] if vocab.is_duration_or_pad(prev_idx) else temperatures[1]
+            repeat_penalty = max(0, np.log((repeat_count+1)/4)/5) * temperature
+            temperature += repeat_penalty
+            if temperature != 1.: logits = logits / temperature
+                
+
+            # Filter
+            # bar = 16 beats
+            filter_value = -float('Inf')
+            if ((last_pos - start_pos) // 16) <= min_bars: logits[vocab.bos_idx] = filter_value
+
+            logits = filter_invalid_indexes(logits, prev_idx, vocab, filter_value=filter_value)
+            logits = top_k_top_p(logits, top_k=top_k, top_p=top_p, filter_value=filter_value)
+            
+            # Sample
+            probs = F.softmax(logits, dim=-1)
+            idx = torch.multinomial(probs, 1).item()
+
+            # Update repeat count
+            num_choices = len(probs.nonzero().view(-1))
+            if num_choices <= 2: repeat_count += 1
+            else: repeat_count = repeat_count // 2
+
+            if prev_idx==vocab.sep_idx: 
+                duration = idx - vocab.dur_range[0]
+                last_pos = last_pos + duration
+
+                bars_pred = (last_pos - start_pos) // 16
+                abs_bar = last_pos // 16
+                # if (bars % 8 == 0) and (bars_pred > min_bars): break
+                if (i / n_words > 0.80) and (abs_bar % 4 == 0): break
+
+
+            if idx==vocab.bos_idx: 
+                print('Predicted BOS token. Returning prediction...')
+                break
+
+            new_idx.append(idx)
+            #put the idx into the pipe
+            p_input.send(idx)
+            x = x.new_tensor([idx])
+            pos = pos.new_tensor([last_pos])
+
+        pred = vocab.to_music_item(np.array(new_idx))
+        full = item.append(pred)
+        return pred, full
+    
     def predict_nw(self, item:MusicItem, n_words:int=128,
                      temperatures:float=(1.0,1.0), min_bars=4,
                      top_k=30, top_p=0.6):
