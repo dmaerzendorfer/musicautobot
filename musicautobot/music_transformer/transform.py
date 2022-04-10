@@ -154,7 +154,7 @@ def idxenc2npenc(t, vocab, validate=True):
     t = t.copy().reshape(-1, 2)
     if t.shape[0] == 0: return t
         
-    t[:, 0] = t[:, 0] - vocab.note_range[0]
+    t[:, 0] = t[:, 0] - vocab.note_range[0] 
     t[:, 1] = t[:, 1] - vocab.dur_range[0]
     
     if validate: return to_valid_npenc(t)

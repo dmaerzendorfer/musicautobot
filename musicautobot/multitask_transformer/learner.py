@@ -53,6 +53,7 @@ class MultitaskLearner(Learner):
 
         self.model.reset()
         new_idx = []
+        last_note = []
         vocab = self.data.vocab
         x, pos = item.to_tensor(), item.get_pos_tensor()
         last_pos = pos[-1] if len(pos) else 0
@@ -112,13 +113,25 @@ class MultitaskLearner(Learner):
                 break
 
             new_idx.append(idx)
-            #put the idx into the pipe
-            p_input.send(idx)
+            last_note.append(idx)
+
+            #if a note is complete->put it into the pipe
+            if prev_idx == vocab.sep_idx:
+                arr2 = np.array(last_note)
+                arr = np.array(new_idx)
+                
+                item = vocab.to_music_item(arr2)
+                p_input.send(item)
+                last_note = []
+
             x = x.new_tensor([idx])
             pos = pos.new_tensor([last_pos])
 
         pred = vocab.to_music_item(np.array(new_idx))
         full = item.append(pred)
+        #send last music_item into the pipe
+        p_input.send(vocab.to_music_item(np.array(last_note)))
+
         return pred, full
     
     def predict_nw(self, item:MusicItem, n_words:int=128,
